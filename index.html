@@ -29,7 +29,9 @@
         .copy-btn { position: absolute; top: 10px; right: 10px; background-color: #007acc; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; transition: 0.2s; }
         .copy-btn:hover { background-color: #005f9e; }
         .note { background-color: #3a3d41; padding: 12px; border-left: 4px solid #d7ba7d; font-style: italic; margin: 15px 0; border-radius: 0 4px 4px 0; }
+        .note-alert { border-left-color: #f44336; background-color: #3b2a2a; }
         .highlight { color: #d7ba7d; font-weight: bold; }
+        .alert-text { color: #ff6b6b; font-weight: bold; }
         .path { color: #4ec9b0; font-weight: bold; font-family: Consolas, monospace; display: block; margin-bottom: 5px; }
     </style>
 </head>
@@ -194,10 +196,7 @@ mkdir -p /tmp/incoming_steam_data/
 mkdir -p /srv/puck/server1/Logs/
 touch /srv/puck/server1/Logs/steam_db.csv
 touch /srv/puck/server1/manual_bans.txt
-chmod 644 /srv/puck/server1/manual_bans.txt
-
-echo '[]' > /srv/puck/server1/banned_steam_ids.json
-chmod 644 /srv/puck/server1/banned_steam_ids.json</code></pre>
+chmod 644 /srv/puck/server1/manual_bans.txt</code></pre>
             <div class="note">Не забудь выполнить установку утилит из вкладки <b>«🛠️ Общие Утилиты»</b> перед настройкой Cron!</div>
         </div>
 
@@ -237,40 +236,7 @@ chmod +x /root/merge_steams.sh</code></pre>
         </div>
 
         <div class="step master">
-            <h2>3. Применение банов (Служба Мастера)</h2>
-            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /root/steamid_ip_sync.sh
-#!/bin/bash
-STEAM_BANS="/srv/puck/server1/banned_steam_ids.json"
-STEAM_DB="/srv/puck/server1/Logs/steam_db.csv"
-IP_BANS="/srv/puck/server1/manual_bans.txt"
-sync_bans() {
-    if [ ! -f "$STEAM_BANS" ]; then return; fi
-    TMP=$(mktemp)
-    jq -r '.[]' "$STEAM_BANS" | while read -r sid; do
-        grep "^$sid;" "$STEAM_DB" | cut -d';' -f2 | tr ',' '\n'
-    done | grep -P '^[0-9.]+$' | sort -u &gt; "$TMP"
-    mv "$TMP" "$IP_BANS" && chmod 644 "$IP_BANS" && chown root:root "$IP_BANS"
-}
-sync_bans
-while inotifywait -e close_write "$STEAM_BANS"; do sync_bans; done
-EOF
-chmod +x /root/steamid_ip_sync.sh
-
-cat &lt;&lt; 'EOF' &gt; /etc/systemd/system/ip_sync.service
-[Unit]
-Description=Sync SteamID Bans Master
-After=network.target
-[Service]
-ExecStart=/bin/bash /root/steamid_ip_sync.sh
-Restart=always
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload && systemctl enable ip_sync && systemctl start ip_sync</code></pre>
-        </div>
-
-        <div class="step master">
-            <h2>4. Настройка Cron (Автоматическое добавление)</h2>
+            <h2>3. Настройка Cron (Автоматическое добавление)</h2>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>(crontab -l 2>/dev/null; cat &lt;&lt; 'EOF'
 # Локальный сбор логов мастера (каждые 5 минут)
 0,5,10,15,20,25,30,35,40,45,50,55 * * * * /bin/bash /srv/puck/server1/Logs/update_steam_db.sh > /dev/null 2>&1
@@ -278,18 +244,6 @@ systemctl daemon-reload && systemctl enable ip_sync && systemctl start ip_sync</
 1,6,11,16,21,26,31,36,41,46,51,56 * * * * /bin/bash /root/merge_steams.sh > /dev/null 2>&1
 EOF
 ) | crontab -</code></pre>
-        </div>
-
-        <div class="step master">
-            <h2>5. Управление банами</h2>
-            <p>Управление глобальными банами происходит только на Главном сервере.</p>
-            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>nano /srv/puck/server1/banned_steam_ids.json
-
-# Пример формата:
-# [
-#   "76561198000000001",
-#   "76561198000000002"
-# ]</code></pre>
         </div>
     </div>
 
@@ -299,6 +253,7 @@ EOF
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>apt update && apt install -y jq inotify-tools cron
 ssh-keygen -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa
 ssh-copy-id root@193.42.124.91</code></pre>
+            <div class="note note-alert"><span class="alert-text">⚠️ Внимание:</span> В команде <code>ssh-copy-id</code> замените <b>193.42.124.91</b> на реальный IP-адрес вашего <b>Главного сервера</b>!</div>
             <div class="note">Не забудь выполнить установку утилит из вкладки <b>«🛠️ Общие Утилиты»</b> перед настройкой Cron!</div>
         </div>
 
@@ -311,69 +266,23 @@ chmod 644 /srv/puck/server1/manual_bans.txt</code></pre>
         </div>
 
         <div class="step client">
-            <h2>3. Скрипты синхронизации</h2>
-            
-            <h3>Обмен данными с Главным (send_to_master.sh)</h3>
+            <h2>3. Скрипт обмена данными с Главным (send_to_master.sh)</h2>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /root/send_to_master.sh
 #!/bin/bash
 LOCAL_DB="/srv/puck/server1/Logs/steam_db.csv"
-BANS_FILE="/srv/puck/server1/banned_steam_ids.json"
 MASTER_IP="193.42.124.91"
 MASTER_DIR="/tmp/incoming_steam_data"
 HOSTNAME=$(hostname)
 
 scp "$LOCAL_DB" root@"$MASTER_IP":"$MASTER_DIR"/"$HOSTNAME".csv
 scp root@"$MASTER_IP":"$LOCAL_DB" "$LOCAL_DB"
-scp root@"$MASTER_IP":"$BANS_FILE" "$BANS_FILE"
 EOF
 chmod +x /root/send_to_master.sh</code></pre>
-
-            <h3>Применение банов (steamid_ip_sync.sh)</h3>
-            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /root/steamid_ip_sync.sh
-#!/bin/bash
-STEAM_BANS="/srv/puck/server1/banned_steam_ids.json"
-STEAM_DB="/srv/puck/server1/Logs/steam_db.csv"
-IP_BANS="/srv/puck/server1/manual_bans.txt"
-
-sync_bans() {
-    if [ ! -f "$STEAM_BANS" ]; then return; fi
-    TMPFILE=$(mktemp)
-    jq -r '.[]' "$STEAM_BANS" | while read -r STEAMID; do
-        grep "^$STEAMID;" "$STEAM_DB" | cut -d';' -f2 | tr ',' '\n'
-    done | grep -P '^[0-9.]+$' | sort -u &gt; "$TMPFILE"
-    mv "$TMPFILE" "$IP_BANS"
-    chmod 644 "$IP_BANS"
-    chown root:root "$IP_BANS"
-}
-
-sync_bans
-while inotifywait -e close_write "$STEAM_BANS"; do sync_bans; done
-EOF
-chmod +x /root/steamid_ip_sync.sh</code></pre>
+            <div class="note note-alert"><span class="alert-text">⚠️ Внимание:</span> В скрипте выше обязательно измените значение <code>MASTER_IP="193.42.124.91"</code> на реальный IP-адрес вашего <b>Главного сервера</b>!</div>
         </div>
 
         <div class="step client">
-            <h2>4. Служба автобана (Systemd)</h2>
-            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /etc/systemd/system/ip_sync.service
-[Unit]
-Description=Sync SteamID Bans
-After=network.target
-StartLimitIntervalSec=0
-
-[Service]
-ExecStart=/bin/bash /root/steamid_ip_sync.sh
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload && systemctl enable ip_sync && systemctl start ip_sync</code></pre>
-        </div>
-
-        <div class="step client">
-            <h2>5. Настройка Cron (Автоматическое добавление)</h2>
+            <h2>4. Настройка Cron (Автоматическое добавление)</h2>
             <p>Этот блок безопасно допишет нужные задачи в конец твоего crontab.</p>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>(crontab -l 2>/dev/null; cat &lt;&lt; 'EOF'
 # Сбор локальных логов клиента (каждые 5 мин)
