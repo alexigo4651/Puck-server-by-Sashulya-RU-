@@ -24,6 +24,7 @@
         .step.master { border-left: 5px solid #4CAF50; }
         .step.client { border-left: 5px solid #c586c0; }
         .step.utils { border-left: 5px solid #d7ba7d; }
+        .step.api { border-left: 5px solid #f39c12; }
         pre { background-color: #151415; padding: 15px; border-radius: 5px; overflow-x: auto; position: relative; border: 1px solid #333; margin-top: 10px; }
         code { font-family: Consolas, "Courier New", monospace; color: #ce9178; font-size: 14px; }
         .copy-btn { position: absolute; top: 10px; right: 10px; background-color: #007acc; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; transition: 0.2s; }
@@ -44,6 +45,7 @@
         <button class="tab-btn" onclick="openTab('master', this)">👑 Главный Сервер</button>
         <button class="tab-btn" onclick="openTab('client', this)">🖥️ Клиентский Сервер</button>
         <button class="tab-btn" onclick="openTab('utils', this)">🛠️ Общие Утилиты</button>
+        <button class="tab-btn" onclick="openTab('api_tab', this)">🌐 Live API</button>
     </div>
 
     <div id="base" class="tab-content active">
@@ -51,7 +53,7 @@
             <b>Установка и настройка сервера (Обновлено для Build 202)</b><br><br>
             <b>Требования:</b>
             <ul>
-                <li>Сервер на базе Debian (Debian 12 bookworm) с SSH-доступом.</li>
+                <li>Сервер на базе Debian (Debian 12 bookworm) или Ubuntu с SSH-доступом.</li>
                 <li>Root-доступ (все команды выполняются от имени пользователя root).</li>
                 <li>Минимум 2 ГБ ОЗУ (каждый сервер Puck потребляет ~300 МБ).</li>
                 <li>Базовые знания командной строки.</li>
@@ -185,6 +187,18 @@ WantedBy=multi-user.target</code></pre>
 systemctl enable puck@server1
 systemctl start puck@server1</code></pre>
         </div>
+        <div class="step base">
+    <h2>Шаг 10: Установка ufw (для безопасности)</h2>
+    <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>apt install ufw
+ufw enable
+ufw allow 22/tcp
+ufw allow 7777/udp
+ufw allow 7778/udp</code></pre>
+    
+    <div class="note">
+    <b>Примечание:</b> Если у вас в конфиге сервера port и pingport не 7777 и 7778, то замените их на свои.
+    </div>
+</div>
     </div>
 
     <div id="master" class="tab-content">
@@ -202,24 +216,19 @@ chmod 644 /srv/puck/server1/manual_bans.txt</code></pre>
         <div class="step master">
             <h2>2. Скрипт объединения баз (merge_steams.sh)</h2>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /root/merge_steams.sh
-# Отредактируй /root/merge_steams.sh на МАСТЕРЕ
-cat << 'EOF' > /root/merge_steams.sh
 #!/bin/bash
 MASTER_DB="/srv/puck/server1/Logs/steam_db.csv"
 INCOMING_DIR="/tmp/incoming_steam_data"
 TMP_MERGE="/tmp/merged_db.csv"
 
 # Собираем в кучу: текущую базу мастера + все присланные файлы от клиентов
-# Используем awk, чтобы схлопнуть дубликаты SteamID и объединить их IP/Ники
 cat "$MASTER_DB" "$INCOMING_DIR"/*.csv 2>/dev/null | awk -F';' '
 BEGIN { OFS=";" }
 {
     sid=$1; ips=$2; nicks=$3
     if (sid == "" || sid == "SteamID") next
     
-    # Собираем уникальные IP
     split(ips, ip_arr, ","); for (i in ip_arr) if (ip_arr[i] != "" && ip_arr[i] != "n/a") a_ips[sid][ip_arr[i]] = 1
-    # Собираем уникальные Ники
     split(nicks, nick_arr, ","); for (i in nick_arr) if (nick_arr[i] != "" && nick_arr[i] != "n/a") a_nicks[sid][nick_arr[i]] = 1
 }
 END {
@@ -231,10 +240,8 @@ END {
     }
 }' > "$TMP_MERGE"
 
-# Заменяем основную базу только если файл не пустой
 if [ -s "$TMP_MERGE" ]; then
     mv "$TMP_MERGE" "$MASTER_DB"
-    # ОЧИЩАЕМ входящие, чтобы не копились старые данные
     rm -f "$INCOMING_DIR"/*.csv
     echo "Слияние завершено успешно."
 fi
@@ -274,21 +281,15 @@ chmod 644 /srv/puck/server1/manual_bans.txt</code></pre>
         <div class="step client">
             <h2>3. Скрипт обмена данными с Главным (send_to_master.sh)</h2>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /root/send_to_master.sh
-# Отредактируй /root/send_to_master.sh на КЛИЕНТЕ
-cat << 'EOF' > /root/send_to_master.sh
 #!/bin/bash
 LOCAL_DB="/srv/puck/server1/Logs/steam_db.csv"
 MASTER_IP="193.42.124.91"
 MASTER_DIR="/tmp/incoming_steam_data"
 HOSTNAME=$(hostname)
 
-# 1. Отправляем свою копию (под уникальным именем)
 scp "$LOCAL_DB" root@"$MASTER_IP":"$MASTER_DIR"/"$HOSTNAME".csv
-
-# 2. Скачиваем общую базу с мастера во временный файл
 scp root@"$MASTER_IP":"/srv/puck/server1/Logs/steam_db.csv" "${LOCAL_DB}.tmp"
 
-# 3. Умное слияние на стороне клиента (чтобы не потерять данные, которые появились ПРЯМО СЕЙЧАС)
 if [ -f "${LOCAL_DB}.tmp" ]; then
     cat "$LOCAL_DB" "${LOCAL_DB}.tmp" | awk -F';' '
     BEGIN { OFS=";" }
@@ -305,7 +306,6 @@ if [ -f "${LOCAL_DB}.tmp" ]; then
     rm "${LOCAL_DB}.tmp"
 fi
 
-# 4. Забираем баны
 scp root@"$MASTER_IP":"/srv/puck/server1/banned_steam_ids.json" "/srv/puck/server1/banned_steam_ids.json"
 EOF
 chmod +x /root/send_to_master.sh</code></pre>
@@ -314,7 +314,6 @@ chmod +x /root/send_to_master.sh</code></pre>
 
         <div class="step client">
             <h2>4. Настройка Cron (Автоматическое добавление)</h2>
-            <p>Этот блок безопасно допишет нужные задачи в конец твоего crontab.</p>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>(crontab -l 2>/dev/null; cat &lt;&lt; 'EOF'
 # Сбор локальных логов клиента (каждые 5 мин)
 0,5,10,15,20,25,30,35,40,45,50,55 * * * * /bin/bash /srv/puck/server1/Logs/update_steam_db.sh > /dev/null 2>&1
@@ -326,7 +325,7 @@ EOF
     </div>
 
     <div id="utils" class="tab-content">
-        <p>Эти скрипты и конфиги <b>нужно установить на всех серверах</b> (и на Мастере, и на Клиентах), так как они отвечают за сбор локальных данных и интерфейс администратора.</p>
+        <p>Эти скрипты и конфиги <b>нужно установить на всех серверах</b> (и на Мастере, и на Клиентах).</p>
 
         <div class="step utils">
             <h2>1. Конфиг IP Logger</h2>
@@ -350,21 +349,15 @@ EOF</code></pre>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /srv/puck/server1/Logs/update_steam_db.sh
 #!/bin/bash
 
-# Пути к файлам (проверь, что они совпадают с твоими)
 LOG_DIR="/srv/puck/server1/Logs"
 DB_FILE="$LOG_DIR/steam_db.csv"
 TMP_IPS="/tmp/steam_ips.txt"
 TMP_NICKS="/tmp/steam_nicks.txt"
 
-# Создаем пустую базу с заголовками, если её нет
 if [ ! -f "$DB_FILE" ]; then
     echo "SteamID;IP_Addresses;Nicknames" > "$DB_FILE"
 fi
 
-echo "Начинаю сбор данных из логов..."
-
-# 1. Сбор IP из файлов .ndjson (используем jq с защитой от битых строк)
-# Вытаскиваем SteamID и IP, разделяем табуляцией для awk
 cat "$LOG_DIR"/ip_logger_*.ndjson 2>/dev/null | \
 jq -R -r 'fromjson? | select(.steam_id != null and .ip != null) | "\(.steam_id)\t\(.ip)"' | \
 awk '{
@@ -374,23 +367,18 @@ awk '{
     if (!found) a[$1] = a[$1] ? a[$1] "," $2 : $2
 } END { for (k in a) print k "\t" a[k] }' > "$TMP_IPS"
 
-# 2. Сбор ников из Puck*.log (используем gawk для корректной работы match)
 gawk '
 {
     sid=""; nick=""
-    # Вариант 1: Поиск в системных сообщениях (учитываем любые слова между ID и ником)
     if (match($0, /Steam Id ([0-9]{17}).*\(([^)]+)\)/, m)) {
         sid = m[1]; nick = m[2]
     } 
-    # Вариант 2: Поиск в сообщениях чата
     else if (match($0, /\[UIChat\] \[[^\]]+\] (.*) \([0-9]+\) \[([0-9]{17})\]:/, c)) {
         nick = c[1]; sid = c[2]
     }
 
     if (sid != "" && nick != "") {
-        # Чистим ник от лишних пробелов по краям
         gsub(/^[ \t]+|[ \t]+$/, "", nick)
-        # Проверка: если в скобках вместо ника попал еще один SteamID, пропускаем
         if (nick ~ /^[0-9]{17}$/) next
         
         split(nicks[sid], ns, ",")
@@ -400,15 +388,11 @@ gawk '
     }
 } END { for (k in nicks) print k "\t" nicks[k] }' "$LOG_DIR"/Puck*.log 2>/dev/null > "$TMP_NICKS"
 
-# 3. Слияние новых данных со старой базой
-# FS (разделитель на входе) - либо точка с запятой, либо табуляция
 awk '
 BEGIN { FS="[;\t]"; OFS=";" }
 function merge(old, new,    arr, k, res, uniq) {
-    # Объединяем старые и новые значения через запятую
     split(old "," new, arr, ",")
     for (k in arr) if (arr[k] != "" && arr[k] != "n/a") uniq[arr[k]] = 1
-    # Собираем уникальный список обратно в строку
     res = ""
     for (k in uniq) res = (res == "") ? k : res "," k
     return (res == "" ? "n/a" : res)
@@ -422,172 +406,81 @@ function merge(old, new,    arr, k, res, uniq) {
 }
 END {
     print "SteamID;IP_Addresses;Nicknames"
-    # Собираем все SteamID, которые встретились в любом из файлов
     for (sid in i) sids[sid]=1; for (sid in n) sids[sid]=1
     for (sid in sids) {
         print sid, (i[sid]?i[sid]:"n/a"), (n[sid]?n[sid]:"n/a")
     }
 }' db="$DB_FILE" t_i="$TMP_IPS" t_n="$TMP_NICKS" "$DB_FILE" "$TMP_IPS" "$TMP_NICKS" > "${DB_FILE}.tmp"
 
-# Сохраняем результат и удаляем временные файлы
 mv "${DB_FILE}.tmp" "$DB_FILE"
 rm -f "$TMP_IPS" "$TMP_NICKS"
-
-echo -e "\n\033[1;32m✅ БАЗА ОБНОВЛЕНА И СИНХРОНИЗИРОВАНА\033[0m"
 EOF
 chmod +x /srv/puck/server1/Logs/update_steam_db.sh</code></pre>
         </div>
-
-        <div class="step utils">
-            <h2>3. Просмотр Базы (view_db.sh)</h2>
-            <span class="path">/srv/puck/server1/Logs/view_db.sh</span>
-            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /srv/puck/server1/Logs/view_db.sh
-#!/bin/bash
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DB_FILE="$DIR/steam_db.csv"
-BAN_FILE="/srv/puck/server1/manual_bans.txt"
-
-[ ! -f "$DB_FILE" ] && { echo "Файл базы не найден!"; exit 1; }
-
-# Цвета
-YELLOW='\033[1;33m'; RESET='\033[0m'; GRAY='\033[0;90m'; BLUE='\033[0;34m'
-CYAN='\033[0;36m'; RED='\033[0;31m'
-
-W_SID=20; W_IP=40; W_NICK=50
-
-# 1. Подготовка данных (пропускаем заголовок файла через NR>1)
-temp_sorted=$(awk -F';' -v ban_file="$BAN_FILE" '
-BEGIN {
-    if ((getline < ban_file) > 0) {
-        do { if ($0 != "") bans[$0] = 1 } while ((getline < ban_file) > 0)
-    }
-    close(ban_file)
-}
-# Пропускаем пустые строки и заголовок самого CSV
-NR>1 && $1 != "" && $1 != "SteamID" {
-    sid=$1; ips=$2; nicks=$3
-    is_banned = 0
-    split(ips, ip_arr, ",")
-    for (i in ip_arr) { if (ip_arr[i] in bans) { is_banned = 1; break } }
-
-    if (is_banned) { prio = 3 }
-    else if (nicks == "" || nicks == "n/a" || nicks ~ /^[[:space:]]*$/) { prio = 2 }
-    else { prio = 1 }
-
-    print prio ";" sid ";" ips ";" nicks
-}' "$DB_FILE" | sort -t';' -k1,1n -k2,2n)
-
-# 2. Отрисовка
-echo "$temp_sorted" | awk -F';' -v Y="$YELLOW" -v R="$RESET" -v G="$GRAY" -v B="$BLUE" -v C="$CYAN" -v RED="$RED" \
-    -v w1="$W_SID" -v w2="$W_IP" -v w3="$W_NICK" '
-function draw_line() {
-    printf G "+"; for(i=0;i<w1+2;i++) printf "-";
-    printf "+"; for(i=0;i<w2+2;i++) printf "-";
-    printf "+"; for(i=0;i<w3+2;i++) printf "-"; print "+" R
-}
-BEGIN {
-    draw_line()
-    printf G "| " R Y "%-"w1"s " G "| " R Y "%-"w2"s " G "| " R Y "%-"w3"s " G "|" R "\n", "SteamID", "IP Addresses", "Nicknames"
-    draw_line()
-}
-{
-    if ($0 == "") next
-    prio=$1; sid=$2; ips=$3; nicks=$4
-    total++
-    
-    current_nick = (nicks == "" || nicks == "n/a") ? "---" : nicks
-    if (prio == 1) with_nick++
-    if (prio == 2) no_nick++
-
-    if (prio == 3) {
-        banned_count++
-        printf RED "| %-"w1"s | %-"w2"s | %-"w3"s |" R "\n", sid, ips, current_nick " [BANNED]"
-    } else {
-        printf G "| " R B "%-"w1"s " G "| " R "%-"w2"s " G "| " R "%-"w3"s " G "|" R "\n", sid, ips, current_nick
-    }
-}
-END {
-    if (total > 0) {
-        draw_line()
-        printf "Всего: " Y "%d" R " | Забанено: " RED "%d" R " | Чисто: " C "%d" R "\n", total, banned_count, total-banned_count
-        printf "С никами: " G "%d" R " | Без ников: " G "%d" R "\n", with_nick, no_nick
-    } else {
-        print "База данных пуста."
-    }
-}'
-EOF
-chmod +x /srv/puck/server1/Logs/view_db.sh</code></pre>
-        </div>
-
-        <div class="step utils">
-            <h2>4. Мониторинг входов (live_logs.sh)</h2>
-            <span class="path">/srv/puck/server1/Logs/live_logs.sh</span>
-            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /srv/puck/server1/Logs/live_logs.sh
-#!/bin/bash
-
-LOG_DIR="/srv/puck/server1/Logs"
-DB_FILE="$LOG_DIR/steam_db.csv"
-
-# 1. Находим самый свежий лог
-LATEST_LOG=$(ls -1t $LOG_DIR/ip_logger_*.ndjson 2>/dev/null | head -n 1)
-
-if [ -z "$LATEST_LOG" ]; then
-    echo "Логи не найдены!"
-    exit 1
-fi
-
-# Цвета
-Y="\033[1;33m"; G="\033[1;32m"; R="\033[1;31m"; RST="\033[0m"; GRY="\033[0;90m"; CYN="\033[1;36m"
-
-echo -e "${GRY}Загрузка последних 40 успешных входов из $LATEST_LOG...${RST}"
-
-# Функция для отрисовки шапки
-print_header() {
-    printf "${Y}%-20s | %-24s | %-15s | %-10s | %s${RST}\n" "SteamID" "Time (UTC)" "IP" "Status" "Nickname"
-    echo -e "${GRY}-------------------------------------------------------------------------------------------------------${RST}"
-}
-
-print_header
-
-# 2. Сначала выводим последние 40 APPROVED из файла
-grep "APPROVED" "$LATEST_LOG" | tail -n 40 | jq -r 'select(.steam_id != null) | "\(.steam_id) \(.ts_utc) \(.ip) \(.decision)"' | awk -v db="$DB_FILE" '
-BEGIN {
-    while ((getline < db) > 0) {
-        split($0, row, ";"); s=row[1]; gsub(/[ \t]+/, "", s); n[s]=row[3]
-    }
-    close(db)
-    Y="\033[1;33m"; G="\033[1;32m"; RST="\033[0m"
-}
-{
-    sid=$1; ts=$2; ip=$3; dec=$4
-    name = (sid in n) ? Y n[sid] RST : "\033[1;30mNew Player\033[0m"
-    printf "%-20s | %-24s | %-15s | %s%-10s%s | %s\n", sid, ts, ip, G, dec, RST, name
-}'
-
-echo -e "${CYN}>>> РЕЖИМ LIVE ЗАПУЩЕН (мониторинг всех событий)${RST}"
-
-# 3. Теперь следим за файлом в реальном времени (показываем всё: и APPROVED, и REJECTED)
-tail -q -n 0 -F "$LATEST_LOG" 2>/dev/null | jq --unbuffered -R -r 'fromjson? | select(.steam_id != null) | "\(.steam_id) \(.ts_utc) \(.ip) \(.decision)"' | awk -v db="$DB_FILE" '
-BEGIN {
-    while ((getline < db) > 0) {
-        split($0, row, ";"); s=row[1]; gsub(/[ \t]+/, "", s); n[s]=row[3]
-    }
-    close(db)
-    Y="\033[1;33m"; G="\033[1;32m"; R="\033[1;31m"; RST="\033[0m"
-}
-{
-    sid=$1; ts=$2; ip=$3; dec=$4
-    name = (sid in n) ? Y n[sid] RST : R "New Player" RST
-    
-    if (dec ~ /^[Aa]/) st_fmt = G sprintf("%-10s", dec) RST
-    else st_fmt = R sprintf("%-10s", dec) RST
-    
-    printf "%-20s | %-24s | %-15s | %s | %s\n", sid, ts, ip, st_fmt, name
-}'
-EOF
-chmod +x /srv/puck/server1/Logs/live_logs.sh</code></pre>
-        </div>
     </div>
+
+    <div id="api_tab" class="tab-content">
+        <div class="note">
+            Эта вкладка позволяет превратить твой <b>Главный сервер</b> в веб-сервис, чтобы ты мог просматривать базу игроков прямо здесь, в браузере. Выполни эти 2 шага на Мастере.
+        </div>
+
+        <div class="step api">
+            <h2>1. Установка Python и запуск API на Мастере</h2>
+            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>apt update && apt install python3-pip -y
+pip install fastapi uvicorn --break-system-packages
+
+cat &lt;&lt; 'EOF' &gt; /root/puck_api.py
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import csv
+import os
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+DB_PATH = "/srv/puck/server1/Logs/steam_db.csv"
+
+@app.get("/db")
+def get_db():
+    players = []
+    if not os.path.exists(DB_PATH):
+        return {"error": "File not found"}
+    
+    with open(DB_PATH, mode='r', encoding='utf-8') as f:
+        reader = csv.DictReader(f, delimiter=';')
+        for row in reader:
+            players.append(row)
+    return players
+EOF</code></pre>
+        </div>
+
+        <div class="step api">
+            <h2>2. Автозапуск API (Systemd)</h2>
+            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /etc/systemd/system/puck-api.service
+[Unit]
+Description=Puck Web API
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 -m uvicorn puck_api:app --host 0.0.0.0 --port 8000
+Restart=always
+User=root
+WorkingDirectory=/root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable puck-api
+systemctl start puck-api</code></pre>
+        </div>
 
     <script>
         function openTab(tabName, btn) {
@@ -599,6 +492,11 @@ chmod +x /srv/puck/server1/Logs/live_logs.sh</code></pre>
             
             document.getElementById(tabName).classList.add("active");
             btn.classList.add("active");
+
+            // Автоматически загружаем данные, если открыта вкладка API
+            if (tabName === 'api_tab') {
+                loadStats();
+            }
         }
 
         function copyCode(btn) {
@@ -609,6 +507,62 @@ chmod +x /srv/puck/server1/Logs/live_logs.sh</code></pre>
                 btn.style.backgroundColor = "#28a745";
                 setTimeout(() => { btn.innerText = originalText; btn.style.backgroundColor = "#007acc"; }, 2000);
             }).catch(err => console.error('Ошибка копирования: ', err));
+        }
+
+        // Логика для API и Живой таблицы
+        async function loadStats() {
+            const statusLabel = document.getElementById('apiStatus');
+            const tableBody = document.getElementById('apiData');
+            
+            statusLabel.innerText = "Загрузка данных с сервера...";
+            statusLabel.style.color = "#d7ba7d";
+
+            try {
+                // Обращение к Мастеру
+                const response = await fetch('http://193.42.124.91:8000/db');
+                
+                if (!response.ok) throw new Error("Сервер вернул ошибку");
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+
+                tableBody.innerHTML = '';
+                
+                // Отрисовка строк
+                data.forEach(player => {
+                    tableBody.innerHTML += `
+                        <tr>
+                            <td style="color: #569cd6;">${player.SteamID || 'N/A'}</td>
+                            <td>${player.IP_Addresses || 'N/A'}</td>
+                            <td style="color: #4CAF50;">${player.Nicknames || 'N/A'}</td>
+                        </tr>`;
+                });
+
+                statusLabel.innerText = `Успешно загружено. Всего игроков: ${data.length}`;
+                statusLabel.style.color = "#4CAF50";
+
+            } catch (err) {
+                console.error("Ошибка API:", err);
+                tableBody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: #ff6b6b;">Ошибка подключения к API. Убедитесь, что служба puck-api запущена на мастере.</td></tr>`;
+                statusLabel.innerText = "Ошибка загрузки!";
+                statusLabel.style.color = "#ff6b6b";
+            }
+        }
+
+        function filterTable() {
+            let input = document.getElementById("dbSearch").value.toUpperCase();
+            let rows = document.getElementById("apiData").getElementsByTagName("tr");
+            
+            for (let row of rows) {
+                // Пропускаем строки с сообщениями об ошибках/загрузке
+                if (row.cells.length < 3) continue; 
+                
+                let text = row.innerText.toUpperCase();
+                row.style.display = text.includes(input) ? "" : "none";
+            }
         }
     </script>
 </body>
