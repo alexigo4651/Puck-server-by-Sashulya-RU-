@@ -202,34 +202,42 @@ chmod 644 /srv/puck/server1/manual_bans.txt</code></pre>
         <div class="step master">
             <h2>2. Скрипт объединения баз (merge_steams.sh)</h2>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /root/merge_steams.sh
+# Отредактируй /root/merge_steams.sh на МАСТЕРЕ
+cat << 'EOF' > /root/merge_steams.sh
 #!/bin/bash
 MASTER_DB="/srv/puck/server1/Logs/steam_db.csv"
 INCOMING_DIR="/tmp/incoming_steam_data"
 TMP_MERGE="/tmp/merged_db.csv"
 
-touch "$MASTER_DB"
-
+# Собираем в кучу: текущую базу мастера + все присланные файлы от клиентов
+# Используем awk, чтобы схлопнуть дубликаты SteamID и объединить их IP/Ники
 cat "$MASTER_DB" "$INCOMING_DIR"/*.csv 2>/dev/null | awk -F';' '
+BEGIN { OFS=";" }
 {
     sid=$1; ips=$2; nicks=$3
     if (sid == "" || sid == "SteamID") next
-
-    split(ips, ip_arr, ","); for (i in ip_arr) if (ip_arr[i] != "" && ip_arr[i] != "n/a") all_ips[sid][ip_arr[i]] = 1
-    split(nicks, nick_arr, ","); for (i in nick_arr) if (nick_arr[i] != "" && nick_arr[i] != "n/a") all_nicks[sid][nick_arr[i]] = 1
+    
+    # Собираем уникальные IP
+    split(ips, ip_arr, ","); for (i in ip_arr) if (ip_arr[i] != "" && ip_arr[i] != "n/a") a_ips[sid][ip_arr[i]] = 1
+    # Собираем уникальные Ники
+    split(nicks, nick_arr, ","); for (i in nick_arr) if (nick_arr[i] != "" && nick_arr[i] != "n/a") a_nicks[sid][nick_arr[i]] = 1
 }
 END {
-    for (sid in all_ips) {
-        ip_str = ""; for (ip in all_ips[sid]) { ip_str = ip_str ? ip_str "," ip : ip }
-        if (ip_str == "") ip_str = "n/a"
-
-        nick_str = ""; for (nick in all_nicks[sid]) { nick_str = nick_str ? nick_str "," nick : nick }
-        if (nick_str == "") nick_str = "n/a"
-
-        print sid ";" ip_str ";" nick_str
+    print "SteamID;IP_Addresses;Nicknames"
+    for (sid in a_ips) {
+        ip_str = ""; for (ip in a_ips[sid]) ip_str = (ip_str=="" ? ip : ip_str "," ip)
+        nick_str = ""; for (nick in a_nicks[sid]) nick_str = (nick_str=="" ? nick : nick_str "," nick)
+        print sid, (ip_str=="" ? "n/a" : ip_str), (nick_str=="" ? "n/a" : nick_str)
     }
 }' > "$TMP_MERGE"
 
-mv "$TMP_MERGE" "$MASTER_DB"
+# Заменяем основную базу только если файл не пустой
+if [ -s "$TMP_MERGE" ]; then
+    mv "$TMP_MERGE" "$MASTER_DB"
+    # ОЧИЩАЕМ входящие, чтобы не копились старые данные
+    rm -f "$INCOMING_DIR"/*.csv
+    echo "Слияние завершено успешно."
+fi
 EOF
 chmod +x /root/merge_steams.sh</code></pre>
         </div>
@@ -266,14 +274,39 @@ chmod 644 /srv/puck/server1/manual_bans.txt</code></pre>
         <div class="step client">
             <h2>3. Скрипт обмена данными с Главным (send_to_master.sh)</h2>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat &lt;&lt; 'EOF' &gt; /root/send_to_master.sh
+# Отредактируй /root/send_to_master.sh на КЛИЕНТЕ
+cat << 'EOF' > /root/send_to_master.sh
 #!/bin/bash
 LOCAL_DB="/srv/puck/server1/Logs/steam_db.csv"
 MASTER_IP="193.42.124.91"
 MASTER_DIR="/tmp/incoming_steam_data"
 HOSTNAME=$(hostname)
 
+# 1. Отправляем свою копию (под уникальным именем)
 scp "$LOCAL_DB" root@"$MASTER_IP":"$MASTER_DIR"/"$HOSTNAME".csv
-scp root@"$MASTER_IP":"$LOCAL_DB" "$LOCAL_DB"
+
+# 2. Скачиваем общую базу с мастера во временный файл
+scp root@"$MASTER_IP":"/srv/puck/server1/Logs/steam_db.csv" "${LOCAL_DB}.tmp"
+
+# 3. Умное слияние на стороне клиента (чтобы не потерять данные, которые появились ПРЯМО СЕЙЧАС)
+if [ -f "${LOCAL_DB}.tmp" ]; then
+    cat "$LOCAL_DB" "${LOCAL_DB}.tmp" | awk -F';' '
+    BEGIN { OFS=";" }
+    {
+        sid=$1; if(sid=="SteamID" || sid=="") next
+        a_ips[$1]=$2; a_nicks[$1]=$3
+    }
+    END {
+        print "SteamID;IP_Addresses;Nicknames"
+        for (id in a_ips) print id, a_ips[id], a_nicks[id]
+    }' > "${LOCAL_DB}.new"
+    
+    mv "${LOCAL_DB}.new" "$LOCAL_DB"
+    rm "${LOCAL_DB}.tmp"
+fi
+
+# 4. Забираем баны
+scp root@"$MASTER_IP":"/srv/puck/server1/banned_steam_ids.json" "/srv/puck/server1/banned_steam_ids.json"
 EOF
 chmod +x /root/send_to_master.sh</code></pre>
             <div class="note note-alert"><span class="alert-text">⚠️ Внимание:</span> В скрипте выше обязательно измените значение <code>MASTER_IP="193.42.124.91"</code> на реальный IP-адрес вашего <b>Главного сервера</b>!</div>
