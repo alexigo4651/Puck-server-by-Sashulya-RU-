@@ -421,19 +421,23 @@ chmod +x /srv/puck/server1/Logs/update_steam_db.sh</code></pre>
 
     <div id="api_tab" class="tab-content">
         <div class="note">
-            Эта вкладка позволяет превратить твой <b>Главный сервер</b> в веб-сервис, чтобы ты мог просматривать базу игроков прямо здесь, в браузере. Выполни эти 2 шага на Мастере.
+            Эта вкладка позволяет превратить твой <b>Главный сервер</b> в админ панель. Выполни эти 4 шага на Мастере.
         </div>
 
-        <div class="step api">
-            <h2>1. Установка Python и запуск API на Мастере</h2>
-            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>apt update && apt install python3-pip -y
+<div class="step api">
+    <h2>1. Установка Python и запуск API на Мастере</h2>
+    <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>apt update && apt install python3-pip -y
 pip install fastapi uvicorn --break-system-packages
 
-cat &lt;&lt; 'EOF' &gt; /root/puck_api.py
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+cat << 'EOF' > /root/puck-api.py
+import subprocess
 import csv
 import os
+import re
+import json
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -444,20 +448,255 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Пути к файлам и директориям
+SERVERS_FILE = "/root/servers.json"
+SSH_DIR = "/root/.ssh/puck_keys"
 DB_PATH = "/srv/puck/server1/Logs/steam_db.csv"
+BAN_FILE = "/srv/puck/server1/banned_steam_ids.json"
+SYNC_SCRIPT = "/root/sync_bans.sh"
+MANUAL_BANS_TXT = "/srv/puck/server1/manual_bans.txt"
+
+# Создаем папку для ключей, если ее нет
+os.makedirs(SSH_DIR, exist_ok=True)
+
+class ServerModel(BaseModel):
+    id: str
+    name: str
+    ip: str
+    ssh_ip: str = None
+    ssh_key: str = None
+
+def get_servers():
+    if not os.path.exists(SERVERS_FILE):
+        data = {
+            "master": {
+                "name": "Master Server", 
+                "ip": "193.42.124.91", 
+                "ssh_ip": "127.0.0.1"
+            }
+        }
+        with open(SERVERS_FILE, "w", encoding="utf-8") as f: 
+            json.dump(data, f, indent=4)
+            
+    with open(SERVERS_FILE, "r", encoding="utf-8") as f: 
+        return json.load(f)
+
+def save_servers(data):
+    with open(SERVERS_FILE, "w", encoding="utf-8") as f: 
+        json.dump(data, f, indent=4)
+
+def run_cmd(server_id: str, cmd: str):
+    servers = get_servers()
+    srv = servers.get(server_id)
+    if not srv: 
+        return "", "Server not found in config", 1
+    
+    target_ip = srv.get("ssh_ip")
+    if not target_ip:
+        target_ip = srv["ip"]
+    
+    if server_id == "master" or target_ip in ["127.0.0.1", "localhost"]:
+        full_cmd = cmd
+    else:
+        key_path = f"{SSH_DIR}/{server_id}"
+        full_cmd = f"ssh -i {key_path} -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@{target_ip} '{cmd}'"
+    
+    try:
+        res = subprocess.run(full_cmd, shell=True, capture_output=True, text=True, timeout=15)
+        return res.stdout, res.stderr, res.returncode
+    except Exception as e:
+        return "", str(e), 1
+
+@app.get("/db/banned-ids")
+async def get_banned_ids():
+    if os.path.exists(BAN_FILE):
+        with open(BAN_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except:
+                return []
+    return []
+    
+@app.post("/server/steam-ban")
+async def steam_ban(data: dict):
+    sid = data.get('steam_id')
+    action = data.get('action')
+    try:
+        bans = []
+        if os.path.exists(BAN_FILE):
+            with open(BAN_FILE, "r") as f:
+                content = f.read()
+                if content: bans = json.loads(content)
+        if action == "ban":
+            if sid not in bans: bans.append(sid)
+        elif action == "unban":
+            if sid in bans: bans.remove(sid)
+        with open(BAN_FILE, "w") as f:
+            json.dump(bans, f, indent=4)
+        subprocess.run(f"bash {SYNC_SCRIPT}", shell=True)
+        return {"status": "success", "message": f"ID {sid} {action}ed"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/servers")
+def api_get_servers():
+    return get_servers()
+    
+@app.get("/server/manual-bans")
+async def get_manual_bans(server_id: str):
+    path = "/srv/puck/server1/manual_bans.txt"
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            ips = [line.strip() for line in f.readlines() if line.strip()]
+        return {"ips": ips}
+    return {"ips": []}
+
+@app.post("/servers/save")
+def api_save_server(srv: ServerModel):
+    servers = get_servers()
+    if srv.ssh_key and srv.ssh_key.strip():
+        key_path = f"{SSH_DIR}/{srv.id}"
+        with open(key_path, "w") as f:
+            f.write(srv.ssh_key.strip() + "\n")
+        os.chmod(key_path, 0o600)
+    servers[srv.id] = {
+        "name": srv.name, 
+        "ip": srv.ip, 
+        "ssh_ip": srv.ssh_ip or srv.ip
+    }
+    save_servers(servers)
+    return {"status": "success"}
+
+@app.delete("/servers/{server_id}")
+def api_del_server(server_id: str):
+    if server_id == "master":
+        return {"error": "Cannot delete master server."}
+    servers = get_servers()
+    if server_id in servers:
+        del servers[server_id]
+        save_servers(servers)
+        key_path = f"{SSH_DIR}/{server_id}"
+        if os.path.exists(key_path): 
+            os.remove(key_path)
+        return {"status": "success"}
+    return {"error": "Server not found."}
+
+@app.get("/server/status")
+def get_status(server_id: str):
+    _, _, code = run_cmd(server_id, "systemctl is-active puck@server1 --quiet")
+    is_online = (code == 0)
+    player_count = 0
+    if is_online:
+        cmd = 'tail -n 2500 /srv/puck/server1/Logs/Puck.log | grep -E "Added clientId|Client disconnected|UIChat|subscription from|Pre-Connection approved"'
+        out_on, _, _ = run_cmd(server_id, cmd)
+        players = {}
+        for line in out_on.splitlines():
+            join = re.search(r"Added clientId (\d+).*?linked to Steam Id \d+ \((.*?)\)", line)
+            if join:
+                players[join.group(1)] = join.group(2)
+            pre = re.search(r"Pre-Connection approved for (\d+)", line)
+            if pre:
+                players[pre.group(1)] = "Connecting..."
+            sub = re.search(r"Received subscription from (.*?) \((\d+)\)", line)
+            if sub:
+                players[sub.group(2)] = sub.group(1)
+            chat = re.search(r"\[UIChat\] \[.*?\] (.*?) \((\d+)\) \[(\d+)\]", line)
+            if chat:
+                players[chat.group(2)] = chat.group(1)
+            leave = re.search(r"Client disconnected \((\d+)\)", line)
+            if leave:
+                p_id = leave.group(1)
+                if p_id in players:
+                    del players[p_id]
+        player_count = len(players)
+    return {"online": is_online, "players": player_count}
+
+@app.get("/server/logs")
+def get_logs(server_id: str, mode: str):
+    path = "/srv/puck/server1/Logs/Puck.log"
+    if mode == "game":
+        cmd = f"tail -n 100 {path}"
+    else:
+        cmd = f'tail -n 500 {path} | grep -E "Connection approved|Added clientId|Client disconnected" | tail -n 50'
+    out, err, _ = run_cmd(server_id, cmd)
+    return {"output": out if out else err}
+    
+@app.get("/server/live-logs")
+def get_live_logs(server_id: str):
+    db_path = "/srv/puck/server1/Logs/steam_db.csv"
+    nicks = {}
+    try:
+        with open(db_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(';')
+                if len(parts) >= 3:
+                    nicks[parts[0].strip()] = parts[2].strip()
+    except: pass
+    cmd = (
+        'LATEST=$(ls -1t /srv/puck/server1/Logs/ip_logger_*.ndjson | head -n 1); '
+        'grep -E "APPROVED|REJECTED" "$LATEST" | tail -n 25 | '
+        'jq -r "[.steam_id, .ts_utc, .ip, .decision] | @tsv"'
+    )
+    out, err, code = run_cmd(server_id, cmd)
+    if code != 0 or not out:
+        return {"output": "Логи пусты или файл не найден."}
+    header = f"{'SteamID':<20} | {'Time':<10} | {'Nickname':<25} | {'IP':<18} | {'Status'}\\n"
+    header += "-" * 95 + "\\n"
+    formatted_out = ""
+    for line in out.strip().split('\\n'):
+        parts = line.split('\\t')
+        if len(parts) == 4:
+            sid, full_time, ip, dec = parts
+            short_time = full_time.split('T')[-1][:8] if 'T' in full_time else "00:00:00"
+            name = nicks.get(sid, "New Player")
+            formatted_out += f"{sid:<20} | {short_time:<10} | {name[:25]:<25} | {ip:<18} | {dec}\\n"
+    return {"output": header + formatted_out}
+
+@app.get("/server/online")
+def get_online(server_id: str):
+    cmd = 'tail -n 2500 /srv/puck/server1/Logs/Puck.log | grep -E "Added clientId|Client disconnected|UIChat|subscription from|Pre-Connection approved"'
+    out, _, _ = run_cmd(server_id, cmd)
+    players = {}
+    for line in out.splitlines():
+        join = re.search(r"Added clientId (\d+) linked to Steam Id (\d+) \((.*?)\)", line)
+        if join:
+            players[join.group(1)] = {"steam": join.group(2), "name": join.group(3)}
+        pre = re.search(r"Pre-Connection approved for (\d+) \((\d+)\)", line)
+        if pre:
+            cid, sid = pre.group(1), pre.group(2)
+            if cid not in players:
+                players[cid] = {"steam": sid, "name": "Connecting..."}
+            else:
+                players[cid]["steam"] = sid
+        sub = re.search(r"Received subscription from (.*?) \((\d+)\)", line)
+        if sub:
+            name, cid = sub.group(1), sub.group(2)
+            if cid not in players:
+                players[cid] = {"steam": "N/A", "name": name}
+            else:
+                players[cid]["name"] = name
+        chat = re.search(r"\[UIChat\] \[.*?\] (.*?) \((\d+)\) \[(\d+)\]", line)
+        if chat:
+            players[chat.group(2)] = {"steam": chat.group(3), "name": chat.group(1)}
+        leave = re.search(r"Client disconnected \((\d+)\)", line)
+        if leave and leave.group(1) in players:
+            del players[leave.group(1)]
+    return {"count": len(players), "list": list(players.values())}
 
 @app.get("/db")
 def get_db():
+    if not os.path.exists(DB_PATH): return []
     players = []
-    if not os.path.exists(DB_PATH):
-        return {"error": "File not found"}
-    
     with open(DB_PATH, mode='r', encoding='utf-8') as f:
         reader = csv.DictReader(f, delimiter=';')
-        for row in reader:
-            players.append(row)
+        for row in reader: players.append(row)
     return players
-EOF</code></pre>
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+EOF
+</code></pre>
         </div>
 
         <div class="step api">
@@ -481,6 +720,570 @@ systemctl daemon-reload
 systemctl enable puck-api
 systemctl start puck-api</code></pre>
         </div>
+        
+       <div class="step api">
+            <h2>3. Админ панель</h2>
+            <div class="note">
+            <b>Создайте файл в блокноте и вставьте этот код</b>
+            </div>
+            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>!DOCTYPE html&gt;
+&lt;html lang="ru"&gt;
+&lt;head&gt;
+    &lt;meta charset="UTF-8"&gt;
+    &lt;title&gt;Puck Cluster Control&lt;/title&gt;
+    &lt;style&gt;
+        :root { --bg: #121212; --card-bg: #1e1e1e; --accent: #007acc; --online: #4caf50; --offline: #f44336; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg); color: #e0e0e0; padding: 20px; margin: 0; }
+        
+        .main-layout { display: flex; gap: 20px; align-items: flex-start; }
+        .controls-section { flex: 1; }
+        .servers-section { width: 350px; display: flex; flex-direction: column; gap: 10px; }
+
+        .card { background: var(--card-bg); padding: 20px; border-radius: 8px; border-left: 5px solid var(--accent); box-shadow: 0 4px 10px rgba(0,0,0,0.5); margin-bottom: 20px; }
+
+        .nick-manual-ban { color: #ff5252; font-weight: bold; text-shadow: 0 0 5px rgba(255,0,0,0.3); }
+        .btn-ban { background: #d32f2f; color: white; padding: 4px 8px; font-size: 10px; }
+        .btn-unban { background: #388e3c; color: white; padding: 4px 8px; font-size: 10px; }
+
+        .server-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .add-btn { background: var(--online); color: white; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; cursor: pointer; font-size: 18px; transition: 0.2s; }
+        .add-btn:hover { transform: scale(1.1); }
+
+        .server-card { background: #252526; border: 2px solid #333; padding: 15px; border-radius: 8px; cursor: pointer; transition: 0.3s; position: relative; }
+        .server-card:hover { border-color: var(--accent); background: #2d2d30; }
+        .server-card.active { border-color: var(--accent); background: #2d2d30; box-shadow: 0 0 15px rgba(0, 122, 204, 0.3); }
+        .server-card .status-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+        .server-card .name { font-weight: bold; font-size: 1.1em; }
+        .server-card .ip { font-size: 0.85em; color: #888; display: block; margin-top: 4px; }
+        .server-card .player-count { 
+            position: absolute; 
+            right: 15px; 
+            top: 70%; 
+            transform: translateY(-50%); 
+            background: #333; 
+            padding: 2px 8px; 
+            border-radius: 10px; 
+            font-weight: bold; 
+            color: var(--online); 
+            font-size: 11px;
+        }
+
+        tr.nick-manual-ban td { 
+            color: #ff5252 !important; 
+            font-weight: bold !important;
+            background-color: rgba(255, 82, 82, 0.05) !important;
+        }
+
+        tr.nick-banned td { 
+            color: #888 !important; 
+            text-decoration: line-through !important;
+            opacity: 0.7;
+        }
+
+        tr.nick-na td { 
+            color: #555 !important; 
+        }
+
+        .stat-item b {
+            font-size: 1.2em;
+            color: #007acc;
+        }
+
+        .card-tools { 
+            position: absolute; 
+            right: 8px; 
+            top: 8px; 
+            display: none; 
+            gap: 10px; 
+            z-index: 10;
+            background: rgba(37, 37, 38, 0.8); 
+            padding: 2px 5px;
+            border-radius: 4px;
+        }
+        .server-card:hover .card-tools { display: flex; }
+        .tool-btn { color: #888; font-size: 16px; cursor: pointer; transition: 0.2s; }
+        .tool-btn.edit:hover { color: var(--accent); }
+        .tool-btn.del:hover { color: var(--offline); }
+
+        .btn-group { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 15px; }
+        button { padding: 12px 18px; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; transition: 0.2s; font-size: 14px; }
+        .btn-start { background: var(--online); color: white; }
+        .btn-restart { background: #007acc; color: white; }
+        .btn-stop { background: #555; color: white; }
+        .btn-run { background: #6a1b9a; color: white; }
+        .btn-log { background: #ffa000; color: black; }
+        button:hover { filter: brightness(1.2); }
+
+        .console { background: #000; color: #0f0; padding: 15px; height: 280px; overflow-y: auto; border: 1px solid #333; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 13px; margin-top: 10px; white-space: pre-wrap; }
+
+        .stats-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px; }
+        .stat-item { background: #252526; padding: 10px; border-radius: 5px; text-align: center; border: 1px solid #333; }
+        .search-box { width: 100%; box-sizing: border-box; padding: 15px; background: #252526; color: white; border: 1px solid #444; border-radius: 4px; font-size: 16px; margin-bottom: 15px; }
+        
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid #333; padding: 12px; text-align: left; }
+        th { background: var(--accent); position: sticky; top: 0; }
+
+        .modal { display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); }
+        .modal-content { background: var(--card-bg); margin: 5% auto; padding: 25px; border-radius: 8px; width: 400px; border: 1px solid var(--accent); }
+        .modal-content input, .modal-content textarea { width: 100%; box-sizing: border-box; padding: 10px; margin-bottom: 15px; background: #121212; border: 1px solid #444; color: white; border-radius: 4px; }
+    &lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+
+    &lt;div class="main-layout"&gt;
+        &lt;div class="controls-section"&gt;
+            &lt;div class="card"&gt;
+                &lt;h3 id="currentSrvName" style="margin-top:0;"&gt;Выбран сервер: Загрузка...&lt;/h3&gt;
+                
+                &lt;div class="btn-group"&gt;
+                    &lt;button class="btn-start" onclick="act('start')"&gt;▶ СТАРТ&lt;/button&gt;
+                    &lt;button class="btn-restart" onclick="act('restart')"&gt;🔄 РЕСТАРТ&lt;/button&gt;
+                    &lt;button class="btn-stop" onclick="act('stop')"&gt;⏹ СТОП&lt;/button&gt;
+                &lt;/div&gt;
+
+                &lt;div class="btn-group"&gt;
+                    &lt;button class="btn-run" onclick="scr('update')"&gt;🗄 Обновить БД&lt;/button&gt;
+                    &lt;button class="btn-run" onclick="scr('twinks')"&gt;🕵 Поиск твинков&lt;/button&gt;
+                    &lt;button class="btn-log" onclick="onl()"&gt;👥 ОНЛАЙН&lt;/button&gt;
+                    &lt;button class="btn-log" onclick="lg('game')"&gt;📄 ЛОГ&lt;/button&gt;
+                    &lt;button class="btn-run" id="btnLive" onclick="toggleLive()"&gt;📡 LIVE: OFF&lt;/button&gt;
+                &lt;/div&gt;
+
+                &lt;div id="onlineList" style="margin: 10px 0; color: var(--online); font-weight: bold;"&gt;&lt;/div&gt;
+                &lt;div class="console" id="out"&gt;Ожидание команд...&lt;/div&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="servers-section"&gt;
+            &lt;div class="server-header"&gt;
+                &lt;h3&gt;Серверы&lt;/h3&gt;
+                &lt;div class="add-btn" onclick="openAdd()"&gt;+&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div id="srvList"&gt;&lt;/div&gt;
+        &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="card" style="border-left-color: var(--online)"&gt;
+        &lt;h3 style="margin-top:0;"&gt;📊 База игроков (Master)&lt;/h3&gt;
+        &lt;div class="stats-bar"&gt;
+            &lt;div class="stat-item"&gt;Всего &lt;b id="statTotal"&gt;0&lt;/b&gt;&lt;/div&gt;
+            &lt;div class="stat-item" style="color:var(--online)"&gt;С никами &lt;b id="statWithNicks"&gt;0&lt;/b&gt;&lt;/div&gt;
+            &lt;div class="stat-item" style="color:var(--offline)"&gt;В бане &lt;b id="statBanned"&gt;0&lt;/b&gt;&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;input type="text" id="q" class="search-box" placeholder="Поиск (SteamID, IP, Ник)..." onkeyup="search()"&gt;
+        &lt;div style="max-height: 400px; overflow-y: auto;"&gt;
+            &lt;table&gt;
+                &lt;thead&gt;&lt;tr&gt;&lt;th&gt;SteamID&lt;/th&gt;&lt;th&gt;IP&lt;/th&gt;&lt;th&gt;Никнейм&lt;/th&gt;&lt;th&gt;Действие&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;
+                &lt;tbody id="db"&gt;&lt;/tbody&gt;
+            &lt;/table&gt;
+        &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div id="srvModal" class="modal"&gt;
+        &lt;div class="modal-content"&gt;
+            &lt;h3 id="modalTitle"&gt;Настройки&lt;/h3&gt;
+            &lt;input type="text" id="newId" placeholder="ID (например: vps-1)"&gt;
+            &lt;input type="text" id="newName" placeholder="Название"&gt;
+            &lt;input type="text" id="newIp" placeholder="Публичный IP"&gt;
+            &lt;input type="text" id="newSshIp" placeholder="SSH IP (локально: 127.0.0.1)"&gt;
+            &lt;textarea id="newKey" placeholder="SSH Private Key (id_rsa)"&gt;&lt;/textarea&gt;
+            &lt;div style="display: flex; gap: 10px;"&gt;
+                &lt;button class="btn-start" style="flex: 2" onclick="saveServer()"&gt;Сохранить&lt;/button&gt;
+                &lt;button class="btn-stop" style="flex: 1" onclick="toggleModal(false)"&gt;Отмена&lt;/button&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;script&gt;
+      const API = "http://193.42.124.91:8000";
+      let currentSrv = 'master';
+      let serversData = {};
+      let isPolling = false;
+
+      const log = (t) =&gt; { 
+          const out = document.getElementById('out');
+          if (out) out.innerText = t; 
+          console.log(t);
+      };
+
+      async function initServers() {
+          try {
+              const r = await fetch(`${API}/servers`);
+              serversData = await r.json();
+              const listDiv = document.getElementById('srvList');
+              listDiv.innerHTML = Object.entries(serversData).map(([id, s]) =&gt; `
+                  &lt;div class="server-card ${id === currentSrv ? 'active' : ''}" id="card-${id}" onclick="selectServer('${id}', '${s.name}')"&gt;
+                      &lt;div class="card-tools"&gt;
+                          &lt;span class="tool-btn edit" onclick="openEdit(event, '${id}')"&gt;✎&lt;/span&gt;
+                          ${id !== 'master' ? `&lt;span class="tool-btn del" onclick="deleteServer(event, '${id}')"&gt;✖&lt;/span&gt;` : ''}
+                      &lt;/div&gt;
+                      &lt;div&gt;
+                          &lt;span class="status-dot" id="dot-${id}" style="background: #555"&gt;&lt;/span&gt;
+                          &lt;span class="name"&gt;${s.name}&lt;/span&gt;
+                          &lt;span class="ip"&gt;${s.ip}&lt;/span&gt;
+                          &lt;span class="player-count" id="count-${id}"&gt;0&lt;/span&gt;
+                      &lt;/div&gt;
+                  &lt;/div&gt;
+              `).join('');
+          } catch(e) { console.error("Ошибка initServers:", e); }
+      }
+
+      function selectServer(id, name) {
+          currentSrv = id;
+          document.querySelectorAll('.server-card').forEach(c =&gt; c.classList.remove('active'));
+          if(document.getElementById(`card-${id}`)) document.getElementById(`card-${id}`).classList.add('active');
+          document.getElementById('currentSrvName').innerText = `Выбран: ${name}`;
+          loadDB(); 
+      }
+
+      async function act(a) {
+          log(`Отправка команды: ${a}...`);
+          try {
+              const r = await fetch(`${API}/server/power?server_id=${currentSrv}&action=${a}`, {method:'POST'});
+              const d = await r.json();
+              log(d.status || d.error || "Команда отправлена");
+          } catch(e) { log("Ошибка связи с API"); }
+      }
+
+      async function lg(mode) {
+          log(`Загрузка логов (${mode})...`);
+          try {
+              const r = await fetch(`${API}/server/logs?server_id=${currentSrv}&mode=${mode}`);
+              const d = await r.json();
+              log(d.output || "Лог пуст или файл не найден.");
+          } catch(e) { log("Ошибка при чтении логов"); }
+      }
+
+      async function onl() {
+          log(`Запрос списка игроков...`);
+          try {
+              const r = await fetch(`${API}/server/online?server_id=${currentSrv}`);
+              const d = await r.json();
+              if (d.list && d.list.length &gt; 0) {
+                  const names = d.list.map(p =&gt; p.name).join(", ");
+                  log(`В СЕТИ (${d.count}):\n` + d.list.map(p =&gt; `• ${p.name} (${p.steam})`).join("\n"));
+                  document.getElementById('onlineList').innerText = `Онлайн: ${names}`;
+              } else {
+                  log("На сервере никого нет.");
+                  document.getElementById('onlineList').innerText = "";
+              }
+          } catch(e) { log("Ошибка получения онлайна"); }
+      }
+
+      async function scr(name) {
+          log(`Запуск скрипта ${name}...`);
+          try {
+              const r = await fetch(`${API}/server/script?server_id=${currentSrv}&script=${name}`, {method:'POST'});
+              const d = await r.json();
+              log(d.output || d.error || "Выполнено.");
+          } catch(e) { log("Ошибка запуска скрипта"); }
+      }
+
+      async function loadDB() {
+          try {
+              const [banRes, dbRes, manualRes] = await Promise.all([
+                  fetch(`${API}/db/banned-ids`),
+                  fetch(`${API}/db`),
+                  fetch(`${API}/server/manual-bans?server_id=${currentSrv}`)
+              ]);
+              
+              const bannedSteamIds = await banRes.json(); 
+              const allPlayers = await dbRes.json();      
+              const manualData = await manualRes.json();
+              const manualIps = (manualData.ips || []).map(ip =&gt; ip.trim());
+
+              const tbody = document.getElementById('db');
+              let s = { t: allPlayers.length, n: 0, b: 0 };
+              let htmlRows = "";
+
+              allPlayers.forEach(p =&gt; {
+                  const sid = p.SteamID || "N/A";
+                  const nick = (p.Nicknames || "n/a").toLowerCase();
+                  const ipsRaw = p.IP_Addresses || "";
+                  const ipsArray = ipsRaw.split(',').map(ip =&gt; ip.trim());
+                  
+                  const isIpBanned = ipsArray.some(ip =&gt; manualIps.includes(ip));
+                  const isSteamBanned = bannedSteamIds.includes(sid);
+
+                  let cl = ""; 
+                  let btn = "";
+
+                  if (isSteamBanned) {
+                      cl = "nick-banned"; s.b++;
+                      btn = `&lt;button class="btn-restart" style="padding:4px 8px; font-size:10px" onclick="manageBan('${sid}', 'unban')"&gt;РАЗБАН&lt;/button&gt;`;
+                  } else if (isIpBanned) {
+                      cl = "nick-manual-ban";
+                      btn = `&lt;button class="btn-stop" style="padding:4px 8px; font-size:10px" onclick="manageBan('${sid}', 'ban')"&gt;БАН ID&lt;/button&gt;`;
+                  } else {
+                      if (nick === "n/a" || nick === "") cl = "nick-na"; else s.n++;
+                      btn = `&lt;button class="btn-stop" style="padding:4px 8px; font-size:10px" onclick="manageBan('${sid}', 'ban')"&gt;БАН&lt;/button&gt;`;
+                  }
+
+                  htmlRows += `&lt;tr class="${cl}"&gt;&lt;td&gt;${sid}&lt;/td&gt;&lt;td&gt;${ipsRaw}&lt;/td&gt;&lt;td&gt;${p.Nicknames || 'n/a'}&lt;/td&gt;&lt;td style="text-align:right"&gt;${btn}&lt;/td&gt;&lt;/tr&gt;`;
+              });
+
+              tbody.innerHTML = htmlRows;
+              document.getElementById('statTotal').innerText = s.t;
+              document.getElementById('statWithNicks').innerText = s.n;
+              document.getElementById('statBanned').innerText = s.b;
+          } catch(e) { console.error("Ошибка loadDB:", e); }
+      }
+
+      async function manageBan(sid, action) {
+          if (!confirm(`Уверены: ${action} для ${sid}?`)) return;
+          try {
+              const r = await fetch(`${API}/server/steam-ban`, {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({ steam_id: sid, action: action })
+              });
+              await loadDB();
+          } catch(e) { alert("Ошибка API"); }
+      }
+
+      async function checkStatus(id) {
+          try {
+              const r = await fetch(`${API}/server/status?server_id=${id}`);
+              const d = await r.json();
+              const dot = document.getElementById(`dot-${id}`);
+              const cnt = document.getElementById(`count-${id}`);
+              if(dot) dot.style.background = d.online ? 'var(--online)' : 'var(--offline)';
+              if(cnt) cnt.innerText = d.players || 0;
+          } catch(e) {}
+      }
+
+      function poll() {
+          if (isPolling) return; isPolling = true;
+          Promise.all(Object.keys(serversData).map(id =&gt; checkStatus(id))).finally(() =&gt; { isPolling = false; });
+      }
+
+      function search() {
+          let v = document.getElementById('q').value.toUpperCase();
+          let rows = document.getElementById('db').getElementsByTagName('tr');
+          for (let r of rows) r.style.display = r.innerText.toUpperCase().includes(v) ? "" : "none";
+      }
+
+      function toggleModal(s) { document.getElementById('srvModal').style.display = s ? 'block' : 'none'; }
+      function openAdd() { 
+          document.getElementById('newId').disabled = false;
+          ['newId','newName','newIp','newSshIp','newKey'].forEach(i=&gt;document.getElementById(i).value='');
+          toggleModal(true); 
+      }
+      function openEdit(e, id) {
+          e.stopPropagation();
+          const s = serversData[id];
+          document.getElementById('newId').value = id;
+          document.getElementById('newId').disabled = true;
+          document.getElementById('newName').value = s.name;
+          document.getElementById('newIp').value = s.ip;
+          document.getElementById('newSshIp').value = s.ssh_ip || '';
+          toggleModal(true);
+      }
+
+      let liveInterval = null;
+
+      async function toggleLive() {
+          const btn = document.getElementById('btnLive');
+          const out = document.getElementById('out');
+          
+          if (liveInterval) {
+              clearInterval(liveInterval);
+              liveInterval = null;
+              btn.innerText = "📡 LIVE: OFF";
+              btn.style.background = "#6a1b9a"; 
+              log("Мониторинг остановлен.");
+          } else {
+              btn.innerText = "📡 LIVE: ON";
+              btn.style.background = "#ff5252"; 
+              log("Запуск Live-мониторинга...");
+              out.innerText = "Загрузка данных...";
+              
+              const refresh = async () =&gt; {
+                  try {
+                      const r = await fetch(`${API}/server/live-logs?server_id=${currentSrv}`);
+                      const d = await r.json();
+                      if (d.output) {
+                          document.getElementById('out').innerText = d.output;
+                      }
+                  } catch(e) { console.error("Live log error:", e); }
+              };
+
+              refresh(); 
+              liveInterval = setInterval(refresh, 3000); 
+          }
+      }
+
+      async function startApp() {
+          await initServers(); 
+          await loadDB();      
+          setInterval(poll, 4000);
+          setInterval(() =&gt; {
+              const searchInput = document.getElementById('q');
+              if (searchInput && searchInput.value === "" && !liveInterval) {
+                  loadDB();
+              }
+          }, 20000); 
+      }
+
+      startApp();
+    &lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;</code></pre>
+<div class="note note-alert"><span class="alert-text">⚠️ Внимание:</span> В скрипте выше обязательно измените значение <code>const response = await fetch('http://193.42.124.91:8000/db');</code> на реальный IP-адрес вашего <b>Главного сервера</b>!</div>
+
+
+    <div class="note">
+        <b>Внимание:</b> Этот файл предназначен только для администратора. Не передавайте его третьим лицам.
+    </div>
+
+    </div>
+
+     <div class="step api">
+            <h2>Синхронизация банов</h2>
+            <div class="note">
+            <b>Данную команду вводим на клиенте и меняем MASTER_IP на IP своего Мастер сервера</b>
+            </div>
+            <div><pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat << 'EOF' > /root/send_to_master_bans.sh
+#!/bin/bash
+
+# --- НАСТРОЙКИ ---
+LOCAL_BANS="/srv/puck/server1/banned_steam_ids.json"
+MASTER_IP="193.42.124.91"
+MASTER_DIR="/tmp/incoming_bans"
+HOSTNAME=$(hostname)
+TMP_DOWNLOAD="/tmp/master_bans.json"
+TMP_MERGE="/tmp/local_merged_bans.json"
+
+echo "--- Синхронизация с Мастером ($MASTER_IP) ---"
+
+# 1. Отправляем свои баны на мастер (с таймаутом 5 сек)
+scp -o ConnectTimeout=5 "$LOCAL_BANS" root@"$MASTER_IP":"$MASTER_DIR"/"${HOSTNAME}_bans.json"
+
+# 2. Скачиваем общую базу с мастера
+scp -o ConnectTimeout=5 root@"$MASTER_IP":"/srv/puck/server1/banned_steam_ids.json" "$TMP_DOWNLOAD"
+
+# 3. Умное слияние (только если файл скачался и он не пустой)
+if [ -s "$TMP_DOWNLOAD" ]; then
+    # Склеиваем локальный файл и файл мастера, убираем дубликаты через jq
+    jq -s 'add | unique' "$LOCAL_BANS" "$TMP_DOWNLOAD" > "$TMP_MERGE"
+    
+    if [ -s "$TMP_MERGE" ]; then
+        mv "$TMP_MERGE" "$LOCAL_BANS"
+        # Даем права, чтобы игровой сервер мог читать и изменять файл
+        chmod 666 "$LOCAL_BANS"
+        echo "Успех: Базы объединены, файл обновлен."
+    fi
+    rm -f "$TMP_DOWNLOAD"
+else
+    echo "Ошибка: Не удалось получить данные с Мастера или файл пуст."
+fi
+EOF
+
+chmod +x /root/send_to_master_bans.sh</code><pre></div>
+     <div class="note">
+            <b>Далее 2 команды ниже мы вводим на Мастер сервере</b>
+            </div>
+             <div><pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat << 'EOF' > /root/sync_bans.sh
+#!/bin/bash
+
+# --- НАСТРОЙКИ ---
+SOURCE_FILE="/srv/puck/server1/banned_steam_ids.json"
+REMOTE_DEST="/srv/puck/server1/banned_steam_ids.json"
+SSH_USER="root"
+
+# Список IP твоих игровых серверов (через пробел)
+SERVERS=(
+    "155.212.142.192"
+)
+
+echo "--- Запуск синхронизации банов ---"
+
+if [ ! -f "$SOURCE_FILE" ]; then
+    echo "Ошибка: Файл $SOURCE_FILE не найден!"
+    exit 1
+fi
+
+for IP in "${SERVERS[@]}"
+do
+    echo "Отправка на $IP..."
+    scp -p -o ConnectTimeout=5 "$SOURCE_FILE" "$SSH_USER@$IP:$REMOTE_DEST"
+    
+    if [ $? -eq 0 ]; then
+        echo "Успешно: $IP обновлен."
+    else
+        echo "ОШИБКА: Не удалось отправить на $IP"
+    fi
+done
+
+echo "--- Синхронизация завершена ---"
+EOF
+
+chmod +x /root/sync_bans.sh</code><pre></div>
+     <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat << 'EOF' > /root/merge_bans.sh
+#!/bin/bash
+
+# --- НАСТРОЙКИ ---
+MASTER_BANS="/srv/puck/server1/banned_steam_ids.json"
+INCOMING_DIR="/tmp/incoming_bans"
+TMP_MERGE="/tmp/merged_bans.json"
+
+# Создаем папку, если её нет
+mkdir -p "$INCOMING_DIR"
+
+echo "--- Запуск слияния баз ---"
+
+# Проверяем, есть ли файлы от клиентов
+if ls "$INCOMING_DIR"/*.json 1> /dev/null 2>&1; then
+    # Склеиваем базу мастера со всеми присланными файлами через jq
+    jq -s 'add | unique' "$MASTER_BANS" "$INCOMING_DIR"/*.json > "$TMP_MERGE"
+
+    if [ -s "$TMP_MERGE" ]; then
+        mv "$TMP_MERGE" "$MASTER_BANS"
+        rm -f "$INCOMING_DIR"/*.json
+        echo "Баны успешно склеены и очищены."
+    else
+        echo "Ошибка: получился пустой файл, отмена."
+    fi
+else
+    echo "Нет новых файлов для слияния."
+fi
+EOF
+
+chmod +x /root/merge_bans.sh</code></pre>
+<div class="note note-alert"><span class="alert-text">⚠️ Внимание:</span> В скрипте выше обязательно измените значение <code>SERVERS=(
+    "155.212.142.192"</code> на IP-адреса <b>Клиент серверов в формате</b>! <code>SERVERS=(
+    "1 ip"
+    "2 ip"
+    "3 ip")</code></div>
+    </div>
+    
+    <div class="step api">
+            <h2>Crontab</h2>
+             <div class="note">
+        <b>Для мастера</b>
+        </div>
+        <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>(crontab -l 2>/dev/null; echo "1-59/2 * * * * bash /root/merge_bans.sh >/dev/null 2>&1") | crontab -</code></pre>
+      
+       <div class="note">
+        <b>Для клиента</b>
+       </div>
+            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>(crontab -l 2>/dev/null; echo "*/2 * * * * bash /root/send_to_master_bans.sh >/dev/null 2>&1") | crontab -</code></pre>
+        </div>
+
+
+    <div class="step api">
+            <h2>4. Безопасность</h2>
+            <div class="note">
+        <b>Чтобы никто не мог подключиться к админ панели кроме вас пишем данную команду и заменяем ip на те которые которые смогут загрузить базу</b>
+    </div>
+            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>sudo ufw allow from Ваш IP to any port 8000
+ufw enable</code></pre>
+            <div class="note">
+        <b>После этого сохраняем файл и делаем формат html, и открываем. База не загрузится если вы не указали свой IP</b>
+    </div>
+        </div>
+</div>
 
     <script>
         function openTab(tabName, btn) {
@@ -507,62 +1310,6 @@ systemctl start puck-api</code></pre>
                 btn.style.backgroundColor = "#28a745";
                 setTimeout(() => { btn.innerText = originalText; btn.style.backgroundColor = "#007acc"; }, 2000);
             }).catch(err => console.error('Ошибка копирования: ', err));
-        }
-
-        // Логика для API и Живой таблицы
-        async function loadStats() {
-            const statusLabel = document.getElementById('apiStatus');
-            const tableBody = document.getElementById('apiData');
-            
-            statusLabel.innerText = "Загрузка данных с сервера...";
-            statusLabel.style.color = "#d7ba7d";
-
-            try {
-                // Обращение к Мастеру
-                const response = await fetch('http://193.42.124.91:8000/db');
-                
-                if (!response.ok) throw new Error("Сервер вернул ошибку");
-                
-                const data = await response.json();
-                
-                if (data.error) {
-                    throw new Error(data.error);
-                }
-
-                tableBody.innerHTML = '';
-                
-                // Отрисовка строк
-                data.forEach(player => {
-                    tableBody.innerHTML += `
-                        <tr>
-                            <td style="color: #569cd6;">${player.SteamID || 'N/A'}</td>
-                            <td>${player.IP_Addresses || 'N/A'}</td>
-                            <td style="color: #4CAF50;">${player.Nicknames || 'N/A'}</td>
-                        </tr>`;
-                });
-
-                statusLabel.innerText = `Успешно загружено. Всего игроков: ${data.length}`;
-                statusLabel.style.color = "#4CAF50";
-
-            } catch (err) {
-                console.error("Ошибка API:", err);
-                tableBody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: #ff6b6b;">Ошибка подключения к API. Убедитесь, что служба puck-api запущена на мастере.</td></tr>`;
-                statusLabel.innerText = "Ошибка загрузки!";
-                statusLabel.style.color = "#ff6b6b";
-            }
-        }
-
-        function filterTable() {
-            let input = document.getElementById("dbSearch").value.toUpperCase();
-            let rows = document.getElementById("apiData").getElementsByTagName("tr");
-            
-            for (let row of rows) {
-                // Пропускаем строки с сообщениями об ошибках/загрузке
-                if (row.cells.length < 3) continue; 
-                
-                let text = row.innerText.toUpperCase();
-                row.style.display = text.includes(input) ? "" : "none";
-            }
         }
     </script>
 </body>
