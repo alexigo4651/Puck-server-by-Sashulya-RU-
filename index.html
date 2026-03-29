@@ -202,6 +202,10 @@ ufw allow 7778/udp</code></pre>
     </div>
 
     <div id="master" class="tab-content">
+         <div class="note">
+            <b>Установка и настройка сервера (Обновлено для Build 202)</b><br><br>
+            <b>Дальнейший гайд требует установки мода ip_logger из мастерской Steam</b>
+        </div>
         <div class="step master">
             <h2>1. Установка зависимостей и папок</h2>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>apt update && apt install -y jq inotify-tools cron
@@ -250,7 +254,76 @@ chmod +x /root/merge_steams.sh</code></pre>
         </div>
 
         <div class="step master">
-            <h2>3. Настройка Cron (Автоматическое добавление)</h2>
+            <h2>3. Автобан через консоль игры по IP</h2>
+            <div><pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat << 'EOF' > /root/steamid_ip_sync.sh
+#!/bin/bash
+
+# Пути к файлам
+STEAM_BANS="/srv/puck/server1/banned_steam_ids.json"
+STEAM_DB="/srv/puck/server1/Logs/steam_db.csv"
+IP_BANS="/srv/puck/server1/manual_bans.txt"
+SERVER_DIR="/srv/puck/server1/"
+
+sync_bans() {
+    # Установка прав доступа перед обработкой
+    chmod 777 "$SERVER_DIR"
+    if [ -f "$STEAM_BANS" ]; then
+        chmod 666 "$STEAM_BANS"
+    else
+        return
+    fi
+
+    TMPFILE=$(mktemp)
+    
+    # Извлекаем SteamID из JSON, ищем их IP в базе и сохраняем в файл банов
+    jq -r '.[]' "$STEAM_BANS" | while read -r STEAMID; do
+        grep "^$STEAMID;" "$STEAM_DB" | cut -d';' -f2 | tr ',' '\n'
+    done | grep -P '^[0-9.]+$' | sort -u > "$TMPFILE"
+
+    mv "$TMPFILE" "$IP_BANS"
+    
+    # Права на итоговый файл для чтения админ-панелью
+    chmod 644 "$IP_BANS"
+    chown root:root "$IP_BANS"
+    
+    echo "$(date) - IP ban list updated and permissions set"
+}
+
+# Первичный запуск при старте скрипта
+sync_bans
+
+# Бесконечный цикл ожидания изменений через inotify
+while inotifywait -e close_write "$STEAM_BANS"; do 
+    sync_bans
+done
+EOF
+
+chmod +x /root/steamid_ip_sync.sh</code></pre></div>
+            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat << 'EOF' > /etc/systemd/system/ip_sync.service
+[Unit]
+Description=Sync SteamID Bans
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /root/steamid_ip_sync.sh
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Активация
+systemctl daemon-reload
+systemctl enable ip_sync.service
+systemctl restart ip_sync.service
+
+# Проверка результата
+systemctl status ip_sync.service</code></pre>
+        </div>
+        <div class="step master">
+            <h2>4. Настройка Cron (Автоматическое добавление)</h2>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>(crontab -l 2>/dev/null; cat &lt;&lt; 'EOF'
 # Локальный сбор логов мастера (каждые 5 минут)
 0,5,10,15,20,25,30,35,40,45,50,55 * * * * /bin/bash /srv/puck/server1/Logs/update_steam_db.sh > /dev/null 2>&1
@@ -262,6 +335,10 @@ EOF
     </div>
 
     <div id="client" class="tab-content">
+         <div class="note">
+            <b>Установка и настройка сервера (Обновлено для Build 202)</b><br><br>
+            <b>Дальнейший гайд требует установки мода ip_logger из мастерской Steam</b>
+        </div>
         <div class="step client">
             <h2>1. Установка зависимостей и ключей</h2>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>apt update && apt install -y jq inotify-tools cron
@@ -312,8 +389,78 @@ chmod +x /root/send_to_master.sh</code></pre>
             <div class="note note-alert"><span class="alert-text">⚠️ Внимание:</span> В скрипте выше обязательно измените значение <code>MASTER_IP="193.42.124.91"</code> на реальный IP-адрес вашего <b>Главного сервера</b>!</div>
         </div>
 
+ <div class="step client">
+            <h2>4. Автобан через консоль игры по IP</h2>
+            <div><pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat << 'EOF' > /root/steamid_ip_sync.sh
+#!/bin/bash
+
+# Пути к файлам
+STEAM_BANS="/srv/puck/server1/banned_steam_ids.json"
+STEAM_DB="/srv/puck/server1/Logs/steam_db.csv"
+IP_BANS="/srv/puck/server1/manual_bans.txt"
+SERVER_DIR="/srv/puck/server1/"
+
+sync_bans() {
+    # Установка прав доступа перед обработкой
+    chmod 777 "$SERVER_DIR"
+    if [ -f "$STEAM_BANS" ]; then
+        chmod 666 "$STEAM_BANS"
+    else
+        return
+    fi
+
+    TMPFILE=$(mktemp)
+    
+    # Извлекаем SteamID из JSON, ищем их IP в базе и сохраняем в файл банов
+    jq -r '.[]' "$STEAM_BANS" | while read -r STEAMID; do
+        grep "^$STEAMID;" "$STEAM_DB" | cut -d';' -f2 | tr ',' '\n'
+    done | grep -P '^[0-9.]+$' | sort -u > "$TMPFILE"
+
+    mv "$TMPFILE" "$IP_BANS"
+    
+    # Права на итоговый файл для чтения админ-панелью
+    chmod 644 "$IP_BANS"
+    chown root:root "$IP_BANS"
+    
+    echo "$(date) - IP ban list updated and permissions set"
+}
+
+# Первичный запуск при старте скрипта
+sync_bans
+
+# Бесконечный цикл ожидания изменений через inotify
+while inotifywait -e close_write "$STEAM_BANS"; do 
+    sync_bans
+done
+EOF
+
+chmod +x /root/steamid_ip_sync.sh</code></pre></div>
+            <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat << 'EOF' > /etc/systemd/system/ip_sync.service
+[Unit]
+Description=Sync SteamID Bans
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /root/steamid_ip_sync.sh
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Активация
+systemctl daemon-reload
+systemctl enable ip_sync.service
+systemctl restart ip_sync.service
+
+# Проверка результата
+systemctl status ip_sync.service</code></pre>
+        </div>
+
         <div class="step client">
-            <h2>4. Настройка Cron (Автоматическое добавление)</h2>
+            <h2>5. Настройка Cron (Автоматическое добавление)</h2>
             <pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>(crontab -l 2>/dev/null; cat &lt;&lt; 'EOF'
 # Сбор локальных логов клиента (каждые 5 мин)
 0,5,10,15,20,25,30,35,40,45,50,55 * * * * /bin/bash /srv/puck/server1/Logs/update_steam_db.sh > /dev/null 2>&1
@@ -325,6 +472,10 @@ EOF
     </div>
 
     <div id="utils" class="tab-content">
+         <div class="note">
+            <b>Установка и настройка сервера (Обновлено для Build 202)</b><br><br>
+            <b>Дальнейший гайд требует установки мода ip_logger из мастерской Steam</b>
+        </div>
         <p>Эти скрипты и конфиги <b>нужно установить на всех серверах</b> (и на Мастере, и на Клиентах).</p>
 
         <div class="step utils">
@@ -420,6 +571,10 @@ chmod +x /srv/puck/server1/Logs/update_steam_db.sh</code></pre>
     </div>
 
     <div id="api_tab" class="tab-content">
+         <div class="note">
+            <b>Установка и настройка сервера (Обновлено для Build 202)</b><br><br>
+            <b>Дальнейший гайд требует установки мода ip_logger из мастерской Steam</b>
+        </div>
         <div class="note">
             Эта вкладка позволяет превратить твой <b>Главный сервер</b> в админ панель. Выполни эти 4 шага на Мастере.
         </div>
@@ -468,6 +623,7 @@ class ServerModel(BaseModel):
 
 def get_servers():
     if not os.path.exists(SERVERS_FILE):
+        # Базовая конфигурация для мастера (показываем 193..., а стучимся на 127...)
         data = {
             "master": {
                 "name": "Master Server", 
@@ -491,13 +647,16 @@ def run_cmd(server_id: str, cmd: str):
     if not srv: 
         return "", "Server not found in config", 1
     
+    # Определяем, куда реально отправлять команду
     target_ip = srv.get("ssh_ip")
     if not target_ip:
         target_ip = srv["ip"]
     
+    # Если это мастер или указан локальный IP, выполняем напрямую без SSH
     if server_id == "master" or target_ip in ["127.0.0.1", "localhost"]:
         full_cmd = cmd
     else:
+        # Иначе используем сохраненный SSH-ключ
         key_path = f"{SSH_DIR}/{server_id}"
         full_cmd = f"ssh -i {key_path} -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@{target_ip} '{cmd}'"
     
@@ -521,23 +680,40 @@ async def get_banned_ids():
 async def steam_ban(data: dict):
     sid = data.get('steam_id')
     action = data.get('action')
+    
     try:
         bans = []
         if os.path.exists(BAN_FILE):
             with open(BAN_FILE, "r") as f:
                 content = f.read()
-                if content: bans = json.loads(content)
+                if content: 
+                    try:
+                        bans = json.loads(content)
+                    except:
+                        bans = []
+
         if action == "ban":
             if sid not in bans: bans.append(sid)
         elif action == "unban":
-            if sid in bans: bans.remove(sid)
+            if sid in bans: 
+                # Фильтруем список, удаляя нужный ID
+                bans = [b for b in bans if b != sid]
+
+        # 1. Сохраняем файл
         with open(BAN_FILE, "w") as f:
             json.dump(bans, f, indent=4)
-        subprocess.run(f"bash {SYNC_SCRIPT}", shell=True)
+        
+        # 2. УСТАНАВЛИВАЕМ ПРАВА (чтобы игра видела файл)
+        os.chmod(BAN_FILE, 0o666)
+        
+        # 3. Запуск рассылки на все VPS
+        if os.path.exists(SYNC_SCRIPT):
+            subprocess.run(f"bash {SYNC_SCRIPT}", shell=True)
+        
         return {"status": "success", "message": f"ID {sid} {action}ed"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
+        
 @app.get("/servers")
 def api_get_servers():
     return get_servers()
@@ -547,18 +723,24 @@ async def get_manual_bans(server_id: str):
     path = "/srv/puck/server1/manual_bans.txt"
     if os.path.exists(path):
         with open(path, "r") as f:
+            # .strip() убирает пробелы и переносы строк
             ips = [line.strip() for line in f.readlines() if line.strip()]
         return {"ips": ips}
     return {"ips": []}
 
+
 @app.post("/servers/save")
 def api_save_server(srv: ServerModel):
     servers = get_servers()
+    
+    # Если передан новый SSH-ключ, сохраняем его в файл
     if srv.ssh_key and srv.ssh_key.strip():
         key_path = f"{SSH_DIR}/{srv.id}"
         with open(key_path, "w") as f:
             f.write(srv.ssh_key.strip() + "\n")
+        # SSH требует строгих прав на файл ключа
         os.chmod(key_path, 0o600)
+    
     servers[srv.id] = {
         "name": srv.name, 
         "ip": srv.ip, 
@@ -571,58 +753,99 @@ def api_save_server(srv: ServerModel):
 def api_del_server(server_id: str):
     if server_id == "master":
         return {"error": "Cannot delete master server."}
+        
     servers = get_servers()
     if server_id in servers:
         del servers[server_id]
         save_servers(servers)
+        
+        # Удаляем файл ключа, чтобы не мусорить
         key_path = f"{SSH_DIR}/{server_id}"
         if os.path.exists(key_path): 
             os.remove(key_path)
+            
         return {"status": "success"}
     return {"error": "Server not found."}
+
+# --- API УПРАВЛЕНИЯ И ИГРЫ ---
 
 @app.get("/server/status")
 def get_status(server_id: str):
     _, _, code = run_cmd(server_id, "systemctl is-active puck@server1 --quiet")
     is_online = (code == 0)
+    
     player_count = 0
     if is_online:
+        # ДОБАВЛЕНО: Ищем еще и subscription from и Pre-Connection
         cmd = 'tail -n 2500 /srv/puck/server1/Logs/Puck.log | grep -E "Added clientId|Client disconnected|UIChat|subscription from|Pre-Connection approved"'
         out_on, _, _ = run_cmd(server_id, cmd)
         players = {}
         for line in out_on.splitlines():
+            # 1. Заход игрока
             join = re.search(r"Added clientId (\d+).*?linked to Steam Id \d+ \((.*?)\)", line)
             if join:
                 players[join.group(1)] = join.group(2)
+                
+            # ДОБАВЛЕНО: Pre-Connection
             pre = re.search(r"Pre-Connection approved for (\d+)", line)
             if pre:
                 players[pre.group(1)] = "Connecting..."
+                
+            # ДОБАВЛЕНО: Subscription
             sub = re.search(r"Received subscription from (.*?) \((\d+)\)", line)
             if sub:
                 players[sub.group(2)] = sub.group(1)
+            
+            # 2. Сообщение в чат (вытаскиваем Ник, ID клиента и SteamID)
             chat = re.search(r"\[UIChat\] \[.*?\] (.*?) \((\d+)\) \[(\d+)\]", line)
             if chat:
-                players[chat.group(2)] = chat.group(1)
+                name = chat.group(1)
+                client_id = chat.group(2)
+                players[client_id] = name
+                
+            # 3. Выход игрока
             leave = re.search(r"Client disconnected \((\d+)\)", line)
             if leave:
                 p_id = leave.group(1)
                 if p_id in players:
                     del players[p_id]
         player_count = len(players)
+        
     return {"online": is_online, "players": player_count}
+    
+@app.post("/server/power")
+async def power_control(server_id: str, action: str):
+    if action not in ["start", "stop", "restart"]:
+        return {"error": "Invalid action"}
 
+    # Если мы делаем рестарт или старт, на всякий случай чиним права на файл банов прямо перед этим
+    if action in ["start", "restart"]:
+        os.system(f"sudo chmod 666 {BAN_FILE}")
+        os.system(f"sudo chown root:root {BAN_FILE}")
+
+    # Сама команда управления
+    cmd = f"sudo /usr/bin/systemctl {action} puck@server1"
+    out, err, code = run_cmd(server_id, cmd)
+    
+    if code == 0:
+        return {"status": "success", "action": action}
+    else:
+        return {"error": err or out}
+        
 @app.get("/server/logs")
 def get_logs(server_id: str, mode: str):
-    path = "/srv/puck/server1/Logs/Puck.log"
+    path = "/srv/puck/server1/Logs/Puck.log" # ПРОВЕРЬ ЭТОТ ПУТЬ!
     if mode == "game":
         cmd = f"tail -n 100 {path}"
     else:
         cmd = f'tail -n 500 {path} | grep -E "Connection approved|Added clientId|Client disconnected" | tail -n 50'
+    
     out, err, _ = run_cmd(server_id, cmd)
     return {"output": out if out else err}
     
 @app.get("/server/live-logs")
 def get_live_logs(server_id: str):
+    # 1. Загружаем ники из БД
     db_path = "/srv/puck/server1/Logs/steam_db.csv"
     nicks = {}
     try:
@@ -630,37 +853,57 @@ def get_live_logs(server_id: str):
             for line in f:
                 parts = line.strip().split(';')
                 if len(parts) >= 3:
+                    # Сохраняем и ник, и IP из базы для сопоставления, если нужно
                     nicks[parts[0].strip()] = parts[2].strip()
     except: pass
+
+    # 2. Получаем сырые данные из лога
     cmd = (
         'LATEST=$(ls -1t /srv/puck/server1/Logs/ip_logger_*.ndjson | head -n 1); '
         'grep -E "APPROVED|REJECTED" "$LATEST" | tail -n 25 | '
         'jq -r "[.steam_id, .ts_utc, .ip, .decision] | @tsv"'
     )
+    
     out, err, code = run_cmd(server_id, cmd)
     if code != 0 or not out:
         return {"output": "Логи пусты или файл не найден."}
-    header = f"{'SteamID':<20} | {'Time':<10} | {'Nickname':<25} | {'IP':<18} | {'Status'}\\n"
-    header += "-" * 95 + "\\n"
+
+    # 3. Формируем ШИРОКУЮ таблицу
+    # SteamID (20) | Time (10) | Nickname (25) | IP (18) | Status (10)
+    header = f"{'SteamID':<20} | {'Time':<10} | {'Nickname':<25} | {'IP':<18} | {'Status'}\n"
+    header += "-" * 95 + "\n"
+    
     formatted_out = ""
-    for line in out.strip().split('\\n'):
-        parts = line.split('\\t')
+    for line in out.strip().split('\n'):
+        parts = line.split('\t')
         if len(parts) == 4:
             sid, full_time, ip, dec = parts
+            
+            # Время: берем только HH:MM:SS
             short_time = full_time.split('T')[-1][:8] if 'T' in full_time else "00:00:00"
+            
+            # Ник из базы (до 25 символов)
             name = nicks.get(sid, "New Player")
-            formatted_out += f"{sid:<20} | {short_time:<10} | {name[:25]:<25} | {ip:<18} | {dec}\\n"
+            display_name = name[:25] 
+            
+            # Сборка строки с большими отступами
+            formatted_out += f"{sid:<20} | {short_time:<10} | {display_name:<25} | {ip:<18} | {dec}\n"
+    
     return {"output": header + formatted_out}
 
 @app.get("/server/online")
 def get_online(server_id: str):
+    # ДОБАВЛЕНО: Ищем еще и subscription from и Pre-Connection
     cmd = 'tail -n 2500 /srv/puck/server1/Logs/Puck.log | grep -E "Added clientId|Client disconnected|UIChat|subscription from|Pre-Connection approved"'
     out, _, _ = run_cmd(server_id, cmd)
     players = {}
     for line in out.splitlines():
+        # 1. Заход игрока
         join = re.search(r"Added clientId (\d+) linked to Steam Id (\d+) \((.*?)\)", line)
         if join:
             players[join.group(1)] = {"steam": join.group(2), "name": join.group(3)}
+            
+        # ДОБАВЛЕНО: Pre-Connection
         pre = re.search(r"Pre-Connection approved for (\d+) \((\d+)\)", line)
         if pre:
             cid, sid = pre.group(1), pre.group(2)
@@ -668,6 +911,8 @@ def get_online(server_id: str):
                 players[cid] = {"steam": sid, "name": "Connecting..."}
             else:
                 players[cid]["steam"] = sid
+                
+        # ДОБАВЛЕНО: Subscription
         sub = re.search(r"Received subscription from (.*?) \((\d+)\)", line)
         if sub:
             name, cid = sub.group(1), sub.group(2)
@@ -675,12 +920,21 @@ def get_online(server_id: str):
                 players[cid] = {"steam": "N/A", "name": name}
             else:
                 players[cid]["name"] = name
+                
+        # 2. Сообщение в чат
         chat = re.search(r"\[UIChat\] \[.*?\] (.*?) \((\d+)\) \[(\d+)\]", line)
         if chat:
-            players[chat.group(2)] = {"steam": chat.group(3), "name": chat.group(1)}
+            name = chat.group(1)
+            client_id = chat.group(2)
+            steam_id = chat.group(3)
+            # Даже если строки захода не было, добавляем игрока в словарь
+            players[client_id] = {"steam": steam_id, "name": name}
+            
+        # 3. Выход игрока
         leave = re.search(r"Client disconnected \((\d+)\)", line)
         if leave and leave.group(1) in players:
             del players[leave.group(1)]
+            
     return {"count": len(players), "list": list(players.values())}
 
 @app.get("/db")
@@ -691,6 +945,34 @@ def get_db():
         reader = csv.DictReader(f, delimiter=';')
         for row in reader: players.append(row)
     return players
+    
+@app.post("/server/script")
+async def run_custom_script(server_id: str, script: str):
+    # Словарь твоих реальных путей
+    script_paths = {
+        "update": "/srv/puck/server1/Logs/update_steam_db.sh",
+        "twinks": "/srv/puck/server1/Logs/find_twinks.sh"
+    }
+    
+    # 1. Проверяем, есть ли такой ключ (db или twinks)
+    full_path = script_paths.get(script)
+    if not full_path:
+        return {"error": f"Скрипт '{script}' не прописан в API. Проверь ключи в Python."}
+    
+    # 2. Проверяем, существует ли файл физически
+    if not os.path.exists(full_path):
+        return {"error": f"Файл не найден по пути: {full_path}"}
+
+    # 3. Запускаем через твою универсальную функцию run_cmd
+    # Мы используем bash, чтобы скрипт точно запустился
+    out, err, code = run_cmd(server_id, f"bash {full_path}")
+    
+    if code == 0:
+        # Если скрипт что-то вывел (например, "База обновлена"), отправляем это в панель
+        return {"output": out if out.strip() else "Скрипт выполнен успешно (без вывода)."}
+    else:
+        # Если скрипт выдал ошибку (code не 0)
+        return {"error": err or out or "Произошла ошибка при выполнении bash-скрипта."}
 
 if __name__ == "__main__":
     import uvicorn
@@ -1184,15 +1466,17 @@ chmod +x /root/send_to_master_bans.sh</code><pre></div>
      <div class="note">
             <b>Далее 2 команды ниже мы вводим на Мастер сервере</b>
             </div>
-             <div><pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat << 'EOF' > /root/sync_bans.sh
-#!/bin/bash
+             <div><pre><button class="copy-btn" onclick="copyCode(this)">Копировать</button><code>cat << 'EOF' > #!/bin/bash
 
 # --- НАСТРОЙКИ ---
+# Путь к локальному файлу банов на Мастере
 SOURCE_FILE="/srv/puck/server1/banned_steam_ids.json"
+# Путь, куда класть файл на удаленных VPS
 REMOTE_DEST="/srv/puck/server1/banned_steam_ids.json"
+# Пользователь для подключения (обычно root или morfi)
 SSH_USER="root"
 
-# Список IP твоих игровых серверов (через пробел)
+# Список IP твоих игровых серверов (добавь сюда все свои Beget VPS)
 SERVERS=(
     "155.212.142.192"
 )
@@ -1207,16 +1491,27 @@ fi
 for IP in "${SERVERS[@]}"
 do
     echo "Отправка на $IP..."
+    # Копируем файл. -o ConnectTimeout=5 чтобы не ждать долго, если сервер оффлайн
     scp -p -o ConnectTimeout=5 "$SOURCE_FILE" "$SSH_USER@$IP:$REMOTE_DEST"
     
     if [ $? -eq 0 ]; then
         echo "Успешно: $IP обновлен."
+        # Если нужно, чтобы сервер сразу перечитал конфиг без рестарта (если игра поддерживает)
+        # ssh "$SSH_USER@$IP" "команда_обновления_банов"
     else
         echo "ОШИБКА: Не удалось отправить на $IP"
     fi
 done
+# Добавь это в самый конец:
+# Исправляем права на Мастере и на удаленных серверах через SSH
+chmod 666 "$SOURCE_FILE"
+for IP in "${SERVERS[@]}"
+do
+    ssh "$SSH_USER@$IP" "chmod 666 $REMOTE_DEST"
+done
 
 echo "--- Синхронизация завершена ---"
+
 EOF
 
 chmod +x /root/sync_bans.sh</code><pre></div>
